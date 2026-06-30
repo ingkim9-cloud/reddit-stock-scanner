@@ -163,9 +163,21 @@ def analyze_with_claude(ranked: list) -> str:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 📌 종합 요약
 
-티커 | 언급 | 모멘텀 | 신뢰도 | 심리
-[티커] | [N]회 | [★표시] | [유형] | [심리]
-(5개 종목 모두 포함)
+반드시 아래와 같이 백틱 3개로 감싼 코드블록 안에 표를 출력할 것.
+코드블록 안에서는 고정폭 폰트가 적용되어 열이 정렬됨.
+
+출력 형식 (백틱 3개로 반드시 감쌀 것):
+```
+티커     언급   모멘텀  신뢰도        심리
+AI       77회  ★★★★★  뉴스기반      혼재
+UWMC     25회  ★★     단일게시물    상승
+BB       23회  ★★★    내러티브      강한상승
+VOO      12회  ★★★★   펀더멘털      상승
+WEN      10회  ★★     투기성        중립
+```
+
+실제 데이터로 위와 같은 형식으로 5개 종목 출력할 것
+신뢰도는 8자 이내로 줄여서 쓸 것 (단일게시물영향→단일게시물, 펀더멘털기반→펀더멘털)
 
 ⚠️ 경고: [밈/과대광고 의심 종목 나열]
 💡 총평: [한 문장, ~음/~함/~임 으로 끝낼 것]
@@ -196,7 +208,7 @@ def send_telegram(message: str) -> None:
     for chunk in chunks:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk},
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "Markdown"},
             timeout=10,
         ).raise_for_status()
         time.sleep(0.5)
