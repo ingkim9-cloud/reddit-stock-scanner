@@ -1,13 +1,14 @@
 """
-Reddit Stock Scanner (API 키 없이 공개 JSON 사용)
-매일 아침 실행 → Claude API 분석 → Telegram 발송
+Reddit RSS Stock Scanner
+Reddit RSS 피드 수집 → Claude API 분석 → Telegram 발송
+API 키 불필요, 봇 차단 없음
 """
 
 import os
 import re
 import time
-import json
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from collections import defaultdict
 
@@ -17,13 +18,13 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
-SUBREDDITS   = ["wallstreetbets", "stocks", "investing", "StockMarket"]
+SUBREDDITS = ["wallstreetbets", "stocks", "investing", "StockMarket"]
 TOP_N        = 20
-MIN_MENTIONS = 3
-FETCH_LIMIT  = 100
+MIN_MENTIONS = 2
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (compatible; RSS Reader)",
+    "Accept": "application/rss+xml, application/xml, text/xml",
 }
 
 EXCLUDE_WORDS = {
@@ -39,29 +40,58 @@ EXCLUDE_WORDS = {
     "CASH", "DEBT", "LINK", "POST", "PAID", "RATE", "RISK", "PLAY", "MOVE",
     "EDIT", "TLDR", "IMHO", "IIRC", "FOMO", "HODL", "DYOR", "ATH", "ATL",
     "EPS", "TTM", "YOY", "QOQ", "TAM", "SAM", "SOM", "EBIT", "EBITDA",
+    "RSS", "XML", "HTTP", "HTTPS", "WWW", "COM", "NET", "ORG",
 }
 
 TICKER_PATTERN = re.compile(r'\b([A-Z]{2,5})\b')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Reddit 공개 JSON 수집 (API 키 불필요)
+# 1. Reddit RSS 수집
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_subreddit(subreddit: str, limit: int = FETCH_LIMIT) -> list[dict]:
-    """Reddit 공개 JSON 엔드포인트 사용 - 로그인/API 키 불필요"""
-    url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit={limit}"
+def fetch_rss(subreddit: str) -> list[dict]:
+    """Reddit RSS 피드로 게시글 수집 - API 키 불필요, 봇 차단 없음"""
+    url = f"https://www.reddit.com/r/{subreddit}/hot.rss?limit=100"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        return resp.json()["data"]["children"]
+
+        root = ET.fromstring(resp.content)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+        posts = []
+        # Atom 형식 파싱
+        for entry in root.findall("atom:entry", ns):
+            title_el = entry.find("atom:title", ns)
+            content_el = entry.find("atom:content", ns)
+            title = title_el.text if title_el is not None else ""
+            content = content_el.text if content_el is not None else ""
+            posts.append({"title": title or "", "content": content or ""})
+
+        # RSS 2.0 형식 파싱 (fallback)
+        if not posts:
+            channel = root.find("channel")
+            if channel:
+                for item in channel.findall("item"):
+                    title_el = item.find("title")
+                    desc_el = item.find("description")
+                    title = title_el.text if title_el is not None else ""
+                    content = desc_el.text if desc_el is not None else ""
+                    posts.append({"title": title or "", "content": content or ""})
+
+        print(f"  [{subreddit}] {len(posts)}개 게시글 수집")
+        return posts
+
     except Exception as e:
-        print(f"[WARN] {subreddit} 수집 실패: {e}")
+        print(f"  [WARN] {subreddit} 수집 실패: {e}")
         return []
 
 
 def extract_tickers(text: str) -> list[str]:
-    return [t for t in TICKER_PATTERN.findall(text) if t not in EXCLUDE_WORDS]
+    # HTML 태그 제거
+    clean = re.sub(r'<[^>]+>', ' ', text)
+    return [t for t in TICKER_PATTERN.findall(clean) if t not in EXCLUDE_WORDS]
 
 
 def collect_mentions() -> dict:
@@ -69,27 +99,19 @@ def collect_mentions() -> dict:
         "count": 0,
         "sources": set(),
         "sample_titles": [],
-        "upvotes": 0,
     })
 
     for sub in SUBREDDITS:
-        posts = fetch_subreddit(sub)
+        posts = fetch_rss(sub)
         for post in posts:
-            data     = post["data"]
-            title    = data.get("title", "")
-            selftext = data.get("selftext", "")
-            upvotes  = data.get("score", 0)
-            tickers  = extract_tickers(title + " " + selftext)
-
+            text = post["title"] + " " + post["content"]
+            tickers = extract_tickers(text)
             for t in set(tickers):
                 ticker_data[t]["count"]   += tickers.count(t)
                 ticker_data[t]["sources"].add(sub)
-                ticker_data[t]["upvotes"] += upvotes
                 if len(ticker_data[t]["sample_titles"]) < 3:
-                    ticker_data[t]["sample_titles"].append(title[:120])
-
-        print(f"  [{sub}] 게시글 {len(posts)}개 수집 완료")
-        time.sleep(2)  # Reddit 요청 간격 준수
+                    ticker_data[t]["sample_titles"].append(post["title"][:120])
+        time.sleep(1)
 
     for v in ticker_data.values():
         v["sources"] = list(v["sources"])
@@ -104,7 +126,7 @@ def filter_and_rank(ticker_data: dict) -> list[dict]:
         if v["count"] >= MIN_MENTIONS
     ]
     filtered.sort(
-        key=lambda x: x["count"] * len(x["sources"]) + x["upvotes"] // 100,
+        key=lambda x: x["count"] * len(x["sources"]),
         reverse=True,
     )
     return filtered[:TOP_N]
@@ -114,40 +136,36 @@ def filter_and_rank(ticker_data: dict) -> list[dict]:
 # 2. Claude API 분석
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_prompt(ranked: list[dict]) -> str:
+def analyze_with_claude(ranked: list[dict]) -> str:
     lines = []
     for item in ranked:
         lines.append(
             f"- {item['ticker']}: 언급 {item['count']}회 | "
             f"서브레딧: {', '.join(item['sources'])} | "
-            f"누적 업보트: {item['upvotes']} | "
             f"샘플 제목: {' / '.join(item['sample_titles'][:2])}"
         )
-    data_block = "\n".join(lines)
 
-    return f"""당신은 Reddit 주식 데이터 분석 전문가입니다.
+    prompt = f"""당신은 Reddit 주식 데이터 분석 전문가입니다.
 아래는 오늘 Reddit에서 가장 많이 언급된 종목 목록입니다.
 
 [데이터]
-{data_block}
+{chr(10).join(lines)}
 
 [분석 지침]
-1. 각 종목을 세 가지 기준으로 평가하세요:
+1. 각 종목을 세 가지 기준으로 평가:
    - 모멘텀 신호: 단순 밈/반복인지, 실질적 스토리(계약·실적·숏스퀴즈 등)가 있는지
    - 감성 방향: 상승 심리 / 하락 심리 / 혼재
    - 주목 이유: 제목 샘플에서 유추되는 핵심 촉매
 
-2. 상위 5개 종목을 "오늘의 레이더"로 선정하고, 각각 2~3문장으로 요약
+2. 상위 5개 종목을 "오늘의 레이더"로 선정, 각각 2~3문장 요약
 
-3. 경고 종목(밈/과대광고 의심)이 있으면 별도 표시
+3. 경고 종목(밈/과대광고 의심) 별도 표시
 
 4. 마지막에 한 줄 총평
 
 [출력 형식] Telegram용 (이모지 사용, 마크다운 없이 일반 텍스트)
 """
 
-
-def analyze_with_claude(ranked: list[dict]) -> str:
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -158,7 +176,7 @@ def analyze_with_claude(ranked: list[dict]) -> str:
         json={
             "model": "claude-sonnet-4-6",
             "max_tokens": 1500,
-            "messages": [{"role": "user", "content": build_prompt(ranked)}],
+            "messages": [{"role": "user", "content": prompt}],
         },
         timeout=60,
     )
@@ -189,7 +207,7 @@ def send_telegram(message: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    print("▶ Reddit 데이터 수집 중... (API 키 없이 공개 JSON 사용)")
+    print("▶ Reddit RSS 수집 중...")
     ticker_data = collect_mentions()
     print(f"  원시 종목 수: {len(ticker_data)}")
 
