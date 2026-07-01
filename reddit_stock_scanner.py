@@ -95,7 +95,7 @@ def collect_mentions() -> dict:
                 ticker_data[t]["sources"].add(sub)
                 if len(ticker_data[t]["sample_titles"]) < 3:
                     ticker_data[t]["sample_titles"].append(post["title"][:120])
-        time.sleep(1)
+        time.sleep(3)
     for v in ticker_data.values():
         v["sources"] = list(v["sources"])
     return dict(ticker_data)
@@ -216,7 +216,7 @@ XXXX     00회  ★★     단일게시물  📉하락
             "max_tokens": 4000,
             "messages": [{"role": "user", "content": prompt}],
         },
-        timeout=60,
+        timeout=120,
     )
     resp.raise_for_status()
     return resp.json()["content"][0]["text"]
